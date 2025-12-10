@@ -210,3 +210,136 @@ class PerChannelMinMaxNorm:
         c_max = flat.max(dim=1, keepdim=True)[0].view(-1, 1, 1)
         scale = (c_max - c_min).clamp(min=1e-6)
         return (tensor - c_min) / scale
+
+
+# imageutil/trans.py (添加到你的文件中)
+
+import torch
+import random
+
+
+class CustomSmartCrop:
+    """
+    智能裁剪：确保类星体核心区域始终在裁剪范围内，但位置随机
+
+    工作原理：
+    1. 计算图像中心（类星体核心位置）
+    2. 计算允许的随机偏移范围（确保核心在裁剪内）
+    3. 随机选择偏移量
+    4. 执行裁剪
+    """
+
+    def __init__(self, crop_size=32, core_size=10):
+        """
+        Args:
+            crop_size: 裁剪后的图像大小 (default: 32)
+            core_size: 类星体核心区域大小 (default: 10)
+                      这个区域必须完全在裁剪范围内
+        """
+        self.crop_size = crop_size
+        self.core_size = core_size
+
+    def __call__(self, image):
+        """
+        Args:
+            image: torch.Tensor of shape (C, H, W)
+        Returns:
+            cropped image: torch.Tensor of shape (C, crop_size, crop_size)
+        """
+        C, H, W = image.shape
+
+        # 图像中心即类星体核心位置
+        center_h, center_w = H // 2, W // 2
+
+        # 核心区域的半径
+        core_half = self.core_size // 2
+
+        # 裁剪窗口的半径
+        crop_half = self.crop_size // 2
+
+        # 计算最大允许偏移量
+        # 偏移后裁剪窗口仍要包含整个核心区域
+        max_offset_h = crop_half - core_half
+        max_offset_w = crop_half - core_half
+
+        # 随机生成偏移量 (可以是负数，表示向左上偏移)
+        offset_h = random.randint(-max_offset_h, max_offset_h)
+        offset_w = random.randint(-max_offset_w, max_offset_w)
+
+        # 计算裁剪中心（在原中心基础上偏移）
+        crop_center_h = center_h + offset_h
+        crop_center_w = center_w + offset_w
+
+        # 计算裁剪边界
+        top = crop_center_h - crop_half
+        bottom = crop_center_h + crop_half
+        left = crop_center_w - crop_half
+        right = crop_center_w + crop_half
+
+        # 边界检查和调整
+        # 如果超出图像边界，将裁剪窗口整体移动到边界内
+        if top < 0:
+            bottom = bottom - top
+            top = 0
+        if left < 0:
+            right = right - left
+            left = 0
+        if bottom > H:
+            top = top - (bottom - H)
+            bottom = H
+        if right > W:
+            left = left - (right - W)
+            right = W
+
+        # 确保裁剪大小正确
+        if bottom - top != self.crop_size:
+            bottom = top + self.crop_size
+        if right - left != self.crop_size:
+            right = left + self.crop_size
+
+        # 执行裁剪
+        cropped = image[:, top:bottom, left:right]
+
+        # 安全检查：如果尺寸不对（极端边界情况），进行填充
+        if cropped.shape[1] != self.crop_size or cropped.shape[2] != self.crop_size:
+            padded = torch.zeros(C, self.crop_size, self.crop_size, dtype=image.dtype, device=image.device)
+            h_actual, w_actual = cropped.shape[1], cropped.shape[2]
+            padded[:, :h_actual, :w_actual] = cropped
+            cropped = padded
+
+        return cropped
+
+
+class CustomRandomMask:
+    """
+    为掩码重构任务创建随机掩码
+
+    掩码策略：
+    - 随机遮盖一定比例的像素
+    - 被遮盖的像素值会在训练时被设为 0
+    - 模型需要根据未遮盖的像素重构被遮盖的部分
+    """
+
+    def __init__(self, mask_ratio=0.75):
+        """
+        Args:
+            mask_ratio: 遮盖比例 (default: 0.75，即 75% 的像素被遮盖)
+        """
+        self.mask_ratio = mask_ratio
+
+    def __call__(self, image):
+        """
+        Args:
+            image: torch.Tensor of shape (C, H, W)
+        Returns:
+            mask: torch.Tensor of shape (C, H, W)，1 表示遮盖，0 表示保留
+        """
+        C, H, W = image.shape
+
+        # 生成随机掩码 (每个像素独立随机)
+        mask = torch.rand(1, H, W, device=image.device) < self.mask_ratio
+
+        # 扩展到所有通道（5个通道使用相同的掩码）
+        mask = mask.expand(C, -1, -1).float()
+
+        return mask
