@@ -175,12 +175,12 @@ if __name__ == "__main__":
     parser.add_argument(
         "--provabgs_file_train",
         type=str,
-        default=f"{ASTROCLIP_ROOT}/train_dataset",
+        default=f"../data/data_g3_z/train_dataset",
     )
     parser.add_argument(
         "--provabgs_file_test",
         type=str,
-        default=f"{ASTROCLIP_ROOT}/test_dataset",
+        default=f"./data/data_g3_z/test_dataset",
     )
 
     parser.add_argument("--batch_size", type=int, default=512)
