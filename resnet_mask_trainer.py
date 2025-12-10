@@ -1,4 +1,4 @@
-# train_masked_autoencoder.py
+# resnet_mask_trainer.py (完整版本)
 
 import argparse
 import os
@@ -9,7 +9,7 @@ from torch.utils.data import DataLoader
 from datetime import datetime
 
 from dataset_util.PairDataset import PairDataset
-from imageutil.trans import CustomSmartCrop, CustomRandomMask
+from imageutil.trans import CustomSmartCrop
 from models.masked_autoencoder import MaskedAutoEncoder
 from pytorch_lightning.callbacks import LearningRateMonitor, ModelCheckpoint
 from pytorch_lightning import loggers as pl_loggers
@@ -20,8 +20,9 @@ import torchvision.transforms as transforms
 import wandb
 from pytorch_lightning.loggers import WandbLogger
 
-# 设置 Wandb API Key
-os.environ['WANDB_API_KEY'] = 'afe3ad467420cf7f8928cf7b1002fa393e016e23'
+# 从 .env 文件加载环境变量
+from dotenv import load_dotenv
+load_dotenv()
 
 # 设置随机种子
 pl.seed_everything(42)
@@ -35,7 +36,6 @@ class FlattenAndReshape:
 
     def __call__(self, x):
         x_flat = x.flatten()
-        # 使用 self.size 动态 reshape (例如 32x32x5 或 64x64x5)
         x_reshaped = x_flat.view(self.size, self.size, 5)
         x_final = x_reshaped.permute(2, 0, 1)
         return x_final
@@ -84,7 +84,7 @@ def parse_args():
     parser.add_argument('--num_workers', type=int, default=4,
                         help="Number of data loading workers (default: 4)")
 
-    # 输出路径 (作为所有实验的根目录)
+    # 输出路径
     parser.add_argument('--output_dir', type=str,
                         default=f'{ROOT_PATH}/outputs/mae',
                         help="Root output directory for checkpoints and logs")
@@ -121,8 +121,22 @@ class MAELightning(pl.LightningModule):
         # 损失函数
         self.criterion = torch.nn.MSELoss()
 
-        # 掩码生成器（在 GPU 上动态生成）
-        self.mask_generator = CustomRandomMask(mask_ratio=mask_ratio)
+        # 保存 mask_ratio
+        self.mask_ratio = mask_ratio
+
+    def generate_mask(self, images):
+        """
+        动态生成随机掩码
+        Args:
+            images: (B, C, H, W)
+        Returns:
+            mask: (B, C, H, W), 1=遮盖，0=保留
+        """
+        B, C, H, W = images.shape
+        # 为每张图像生成不同的掩码
+        mask = torch.rand(B, 1, H, W, device=images.device) < self.mask_ratio
+        mask = mask.expand(-1, C, -1, -1).float()
+        return mask
 
     def forward(self, x, mask=None):
         return self.model(x, mask)
@@ -131,7 +145,7 @@ class MAELightning(pl.LightningModule):
         images = batch['image']
 
         # 动态生成掩码
-        mask = self.mask_generator(images)
+        mask = self.generate_mask(images)
 
         # 前向传播
         reconstructed = self(images, mask)
@@ -159,7 +173,7 @@ class MAELightning(pl.LightningModule):
         images = batch['image']
 
         # 生成掩码
-        mask = self.mask_generator(images)
+        mask = self.generate_mask(images)
 
         # 前向传播
         reconstructed = self(images, mask)
@@ -202,18 +216,14 @@ class MAELightning(pl.LightningModule):
 
 
 def main():
-    # 解析命令行参数
     args = parse_args()
 
-    # ================= 生成唯一实验路径 =================
-    # 获取当前时间
+    # 生成唯一实验路径
     current_time = datetime.now().strftime("%m%d_%H%M")
 
-    # 构造实验名称 (Run Name)
     if args.wandb_name:
         run_name = f"{args.wandb_name}_{current_time}"
     else:
-        # 自动命名: mae_crop32_mask75_lr0.001_1208_1830
         run_name = f"mae_crop{args.crop_size}_core{args.core_size}_mask{int(args.mask_ratio * 100)}_lr{args.lr}_{current_time}"
 
     print("=" * 70)
@@ -229,11 +239,9 @@ def main():
     print(f"  - Devices: {args.devices}")
     print("=" * 70)
 
-    # 构造该次实验的专属目录
     experiment_dir = os.path.join(args.output_dir, run_name)
     os.makedirs(experiment_dir, exist_ok=True)
     print(f"📁 Experiment Directory: {experiment_dir}\n")
-    # ============================================================
 
     # 加载数据集
     print("📦 Loading datasets...")
@@ -242,13 +250,13 @@ def main():
     print(f"  - Train dataset size: {len(train_dataset_hf)}")
     print(f"  - Test dataset size: {len(test_dataset_hf)}")
 
-    # 定义 transform (智能裁剪 + reshape)
+    # 定义 transform
     transform = transforms.Compose([
         CustomSmartCrop(crop_size=args.crop_size, core_size=args.core_size),
         FlattenAndReshape(size=args.crop_size),
     ])
 
-    # 创建自定义数据集实例
+    # 创建数据集
     train_dataset = PairDataset(train_dataset_hf, transform=transform)
     test_dataset = PairDataset(test_dataset_hf, transform=transform)
 
@@ -292,14 +300,13 @@ def main():
     print("📊 Initializing Wandb Logger...")
     wandb_logger = WandbLogger(
         project=args.wandb_project,
-        name=run_name,  # Wandb 网页显示的名称
+        name=run_name,
         offline=args.wandb_offline,
         log_model=True,
-        save_dir=experiment_dir,  # Wandb 日志保存在专属文件夹内
-        version=run_name  # 强制本地文件夹名与 run_name 一致
+        save_dir=experiment_dir,
+        version=run_name
     )
 
-    # 记录配置到 wandb
     wandb_logger.log_hyperparams({
         "architecture": "Masked-AutoEncoder-ResNet",
         "dataset": "astro-g3",
@@ -311,10 +318,10 @@ def main():
         "experiment_dir": experiment_dir
     })
 
-    # 设置训练器参数
+    # 设置训练器
     trainer = pl.Trainer(
         log_every_n_steps=16,
-        default_root_dir=experiment_dir,  # Checkpoint 默认根目录
+        default_root_dir=experiment_dir,
         enable_checkpointing=True,
         gradient_clip_val=args.gradient_clip_val,
         max_epochs=args.max_epochs,
@@ -323,13 +330,12 @@ def main():
         callbacks=[
             LearningRateMonitor(logging_interval='step'),
             ModelCheckpoint(
-                dirpath=os.path.join(experiment_dir, "checkpoints"),  # 显式指定 ckpt 保存路径
-                monitor="val_loss_masked",  # 监控掩码区域的验证损失
+                dirpath=os.path.join(experiment_dir, "checkpoints"),
+                monitor="val_loss_masked",
                 save_top_k=3,
                 save_last=True,
                 every_n_epochs=1,
                 mode="min",
-                # 动态文件名: epoch_005-val_loss_masked_0.1234.ckpt
                 filename='epoch_{epoch:03d}-val_loss_masked_{val_loss_masked:.4f}',
                 auto_insert_metric_name=False
             ),
@@ -337,26 +343,24 @@ def main():
         strategy='ddp' if len(args.devices) > 1 else 'auto',
         accelerator='gpu',
         devices=args.devices,
-        precision='16-mixed',  # 使用混合精度训练加速
+        precision='16-mixed',
         enable_progress_bar=True,
         enable_model_summary=True
     )
 
-    # 使用 Trainer 进行训练
+    # 训练
     print("\n" + "=" * 70)
     print("🎯 Starting training...")
     print("=" * 70 + "\n")
 
     trainer.fit(model, train_loader, test_loader)
 
-    # 训练完成
     print("\n" + "=" * 70)
     print("✅ Training completed!")
     print(f"📁 Best model saved at: {trainer.checkpoint_callback.best_model_path}")
     print(f"📈 Best validation loss (masked): {trainer.checkpoint_callback.best_model_score:.6f}")
     print("=" * 70)
 
-    # 训练完成后关闭 wandb
     wandb.finish()
 
 
